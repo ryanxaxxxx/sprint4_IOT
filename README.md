@@ -10,6 +10,8 @@ Foi pensado como um protótipo de **segurança IoT para motocicletas**.
 
 Link para o vídeo:  
 
+Link caso queira abrir no Wokwi: https://wokwi.com/projects/444434123116088321
+
 ## 📦 Tecnologias e Componentes Utilizados
 
 * **ESP 32**
