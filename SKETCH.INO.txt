@@ -1,0 +1,305 @@
+SKETCH.INO
+
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <WiFi.h>
+#include <ArduinoJson.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+ 
+// ================= CONFIGURAÇÕES WIFI =================
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+ 
+// ================= CONFIGURAÇÕES MQTT =================
+const char* mqttServer = "test.mosquitto.org"; 
+const uint16_t mqttPort = 1883;                 
+const char* mqttTopic = "moto/yard/ryan";     
+const char* deviceId = "ryan-esp32-01";        
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// ================= CONFIGURAÇÃO DHT22 =================
+#define DHTPIN 15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+ 
+float currentTemp = 0.0;
+float currentHumidity = 0.0;
+ 
+// ================= CONFIGURAÇÃO ESP32 =================
+LiquidCrystal_I2C lcd(0x27,16,2);
+ 
+const uint8_t ledPins[] = {2,4,16,17}; // Vermelho, Amarelo, Verde, Azul
+const uint8_t NUM_LEDS = sizeof(ledPins)/sizeof(ledPins[0]);
+ 
+const uint8_t buttonPin = 5;
+const unsigned long DEBOUNCE_MS = 50;
+const unsigned long LONG_PRESS_MS = 1000;
+ 
+int currentLedIndex = -1;
+int lastButtonState = LOW;
+unsigned long lastDebounceTime = 0;
+unsigned long buttonDownTime = 0;
+ 
+// ================= LOCALIZAÇÃO SIMULADA =================
+struct Location {
+  float lat;
+  float lon;
+};
+ 
+Location currentLocation = { -23.5505, -46.6333 }; 
+String currentStatus = "waiting";
+bool systemAlert = false;
+ 
+// ================= PROTÓTIPOS =================
+void setup_wifi();
+void setup_mqtt();
+void ensureMqtt();
+void publishState(const char* reason);
+void changeStatus();
+void allOff();
+void readTemperature();
+void handleButton();
+Location getLocation();
+ 
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+ 
+  Serial.println("🏍️  Sistema MotoSecurity Iniciando...");
+ 
+  dht.begin();
+  Serial.println("🌡️  Sensor DHT22 inicializado");
+ 
+  for(uint8_t i=0;i<NUM_LEDS;i++){
+    pinMode(ledPins[i],OUTPUT);
+    digitalWrite(ledPins[i],LOW);
+  }
+ 
+  pinMode(buttonPin, INPUT_PULLUP);
+ 
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("MotoSecurity IoT");
+  lcd.setCursor(0,1);
+  lcd.print("Iniciando...");
+ 
+  delay(1000);
+ 
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Conectando WiFi");
+  setup_wifi();
+
+  // MQTT
+  setup_mqtt();
+ 
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Aguardando...");
+  lcd.setCursor(0,1);
+  lcd.print("Pressione botao");
+}
+ 
+// ================= LOOP =================
+void loop() {
+  handleButton();
+
+ 
+  ensureMqtt();
+  mqttClient.loop();
+ 
+ 
+  static unsigned long lastTempRead = 0;
+  if(millis() - lastTempRead > 3000){
+    lastTempRead = millis();
+    readTemperature();
+    publishState("periodic");
+  }
+}
+ 
+// ================= FUNÇÕES =================
+void handleButton(){
+  int reading = digitalRead(buttonPin);
+  reading = !reading; 
+ 
+  if(reading != lastButtonState){
+    lastDebounceTime = millis();
+  }
+ 
+  if((millis() - lastDebounceTime) > DEBOUNCE_MS){
+    if(reading == HIGH && lastButtonState == LOW){
+      buttonDownTime = millis();
+    }
+    if(reading == LOW && lastButtonState == HIGH){
+      unsigned long pressDuration = millis() - buttonDownTime;
+      if(pressDuration >= LONG_PRESS_MS){
+        allOff();
+      } else {
+        changeStatus();
+      }
+    }
+  }
+ 
+  lastButtonState = reading;
+}
+ 
+void changeStatus(){
+  // Apaga LED atual
+  if(currentLedIndex >=0) digitalWrite(ledPins[currentLedIndex],LOW);
+ 
+  // Próximo LED
+  currentLedIndex = (currentLedIndex+1)%NUM_LEDS;
+  digitalWrite(ledPins[currentLedIndex],HIGH);
+ 
+  // Atualiza LCD e Serial
+  lcd.clear();
+  lcd.setCursor(0,0);
+  switch(currentLedIndex){
+    case 0: lcd.print("Sistema OK"); currentStatus="system_ok"; break;
+    case 1: lcd.print("Manutencao"); currentStatus="maintenance"; break;
+    case 2: lcd.print("Moto Liberada"); currentStatus="released"; break;
+    case 3: lcd.print("Em Uso"); currentStatus="in_use"; break;
+  }
+  lcd.setCursor(0,1);
+  lcd.print("T:");
+  lcd.print(currentTemp,1);
+  lcd.print("C H:");
+  lcd.print(currentHumidity,0);
+  lcd.print("%");
+ 
+  
+  currentLocation = getLocation();
+ 
+  
+  publishState("status_change");
+ 
+  Serial.println("💡 Status atualizado: " + currentStatus);
+}
+ 
+void allOff(){
+  for(uint8_t i=0;i<NUM_LEDS;i++) digitalWrite(ledPins[i],LOW);
+ 
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Sistema OFF");
+  lcd.setCursor(0,1);
+  lcd.print("Desligado");
+ 
+  currentLedIndex = -1;
+  currentStatus = "offline";
+ 
+  Serial.println("🔴 Sistema desligado");
+ 
+  delay(2000);
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Aguardando...");
+  lcd.setCursor(0,1);
+  lcd.print("Pressione botao");
+  currentStatus="waiting";
+}
+ 
+void readTemperature(){
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+ 
+  if(!isnan(t) && !isnan(h)){
+    currentTemp = t;
+    currentHumidity = h;
+   
+    bool highTemp = currentTemp >= 37.0;        
+    bool humAlert = (currentHumidity <= 20.0) || (currentHumidity >= 85.0);
+    systemAlert = highTemp || humAlert || (currentStatus == "offline");
+    Serial.println("🌡️ Temp: " + String(currentTemp,1) + "°C | Umid: " + String(currentHumidity,0) + "%");
+  }
+}
+ 
+void setup_wifi(){
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid,password);
+  int attempts=0;
+  while(WiFi.status()!=WL_CONNECTED && attempts<20){
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  if(WiFi.status()==WL_CONNECTED){
+    Serial.println("\n✅ WiFi conectado!");
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("WiFi Conectado");
+    lcd.setCursor(0,1);
+    lcd.print(WiFi.localIP().toString());
+  } else {
+    Serial.println("\n❌ Falha ao conectar WiFi");
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("WiFi Falhou");
+  }
+}
+ 
+// ================= LOCALIZAÇÃO SIMULADA =================
+Location getLocation() {
+  Location loc;
+  // Simula posições diferentes conforme o estado
+  if(currentStatus == "system_ok") { loc = {-23.5505, -46.6333}; }     
+  else if(currentStatus == "maintenance") { loc = {-23.5507, -46.6335}; } 
+  else if(currentStatus == "released") { loc = {-23.5509, -46.6331}; }   
+  else if(currentStatus == "in_use") { loc = {-23.5515, -46.6320}; }     
+  else { loc = {-23.5505, -46.6333}; }                                   
+  return loc;
+}
+
+// ================= MQTT =================
+void setup_mqtt(){
+  mqttClient.setServer(mqttServer, mqttPort);
+}
+
+void ensureMqtt(){
+  if(!mqttClient.connected()){
+    Serial.print("Conectando MQTT");
+    String clientId = String(deviceId) + "-" + String(random(0xFFFF), HEX);
+    int retries = 0;
+    while(!mqttClient.connected() && retries < 10){
+      if(mqttClient.connect(clientId.c_str())){
+        Serial.println("\n✅ MQTT conectado!");
+        
+        publishState("connected");
+      } else {
+        Serial.print(".");
+        delay(500);
+        retries++;
+      }
+    }
+    if(!mqttClient.connected()){
+      Serial.println("\n❌ Falha MQTT");
+    }
+  }
+}
+
+void publishState(const char* reason){
+  StaticJsonDocument<256> doc;
+  doc["deviceId"] = deviceId;
+  doc["status"] = currentStatus;
+  doc["temp"] = currentTemp;
+  doc["humidity"] = currentHumidity;
+  doc["lat"] = currentLocation.lat;
+  doc["lon"] = currentLocation.lon;
+  doc["alert"] = systemAlert;
+  doc["reason"] = reason;
+  doc["ts"] = (uint32_t) (millis());
+
+  char buffer[256];
+  size_t n = serializeJson(doc, buffer, sizeof(buffer));
+  Serial.println(buffer);
+  if(mqttClient.connected()){
+    mqttClient.publish(mqttTopic, (uint8_t*)buffer, n, false);
+  }
+}
