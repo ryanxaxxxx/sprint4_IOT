@@ -8,7 +8,7 @@ Foi pensado como um protótipo de **segurança IoT para motocicletas**.
 
 ---
 
-Link para o vídeo:  
+Link para o vídeo:  https://youtu.be/JXjE-UecYsA
 
 Link caso queira abrir no Wokwi: https://wokwi.com/projects/444434123116088321
 
